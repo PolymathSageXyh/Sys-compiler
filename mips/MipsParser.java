@@ -2,6 +2,7 @@ package mips;
 
 import lightllr.*;
 import lightllr.Module;
+import paser.Mypair;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -16,6 +17,37 @@ public class MipsParser {
     private HashMap<Value, Integer> stackOffsetMap;
     private HashMap<Value, Register> var2reg;
     private HashMap<Register, Value> reg2var;
+    private static HashMap<Integer, MulOptimizer> mulOptimizers = new HashMap<>();
+
+    static {
+        ArrayList<MulOptimizer> tmp = new ArrayList<>();
+        int minus = 0x80000000;
+        for (int i = 0; i < 32; i++) {
+            tmp.add(new MulOptimizer(i));
+            tmp.add(new MulOptimizer(i | minus));
+            for (int j = 0; j < 32; j++) {
+                tmp.add(new MulOptimizer(i, j));
+                tmp.add(new MulOptimizer(i | minus, j));
+                tmp.add(new MulOptimizer(i, j | minus));
+                tmp.add(new MulOptimizer(i | minus, j | minus));
+            }
+        }
+        for (MulOptimizer tt : tmp) {
+            if (!mulOptimizers.containsKey(tt.getMultiplier()) ||
+                    tt.getSteps() < mulOptimizers.get(tt.getMultiplier()).getSteps()) {
+                mulOptimizers.put(tt.getMultiplier(), tt);
+            }
+        }
+    }
+
+    public static ArrayList<Mypair<Boolean, Integer>> getMulOptShifts(int multiplier) {
+        if (mulOptimizers.containsKey(multiplier)) {
+            return mulOptimizers.get(multiplier).getItems();
+        }
+        else {
+            return new ArrayList<>();
+        }
+    }
 
     public MipsParser(Module module) {
         this.module = module;
@@ -325,7 +357,124 @@ public class MipsParser {
         }
     }
 
+    public void parseMulEfficient(BinaryInstr instr) {
+        Value operand1 = instr.getOperand(0);
+        Value operand2 = instr.getOperand(1);
+        boolean isOp1Const = operand1 instanceof ConstantInt;
+        boolean isOp2Const = operand2 instanceof ConstantInt;
+        Register tarReg = getRegOf(instr);
+        if (tarReg == null) {
+            tarReg = Register.K0;
+        }
+        if (isOp1Const && isOp2Const) {
+            int op1 = ((ConstantInt)operand1).getTruth();
+            int op2 = ((ConstantInt)operand2).getTruth();
+            int res =  op1 * op2;
+            new LiAsm(assemblyTable, tarReg, res);
+            if (getRegOf(instr) == null) {
+                subCurOffset(4);
+                int curOffset = curStackOffset;
+                addValueOffsetMap(instr, curOffset);
+                new MemAsm(assemblyTable,  "sw", tarReg, Register.SP, curOffset);
+            }
+        } else if (isOp1Const || isOp2Const) {
+            Register srcReg = Register.K1;
+            int imm;
+            if (isOp1Const) {
+                imm = ((ConstantInt)operand1).getTruth();
+                if (getRegOf(operand2) != null) {
+                    srcReg = getRegOf(operand2);
+                } else {
+                    Integer offset = getOffsetOf(operand2);
+                    if (offset == null) {
+                        subCurOffset(4);
+                        offset = curStackOffset;
+                        addValueOffsetMap(operand2, offset);
+                    }
+                    new MemAsm(assemblyTable, "lw", srcReg, Register.SP, offset);
+                }
+            } else {
+                imm = ((ConstantInt)operand2).getTruth();
+                if (getRegOf(operand1) != null) {
+                    srcReg = getRegOf(operand1);
+                } else {
+                    Integer offset = getOffsetOf(operand1);
+                    if (offset == null) {
+                        subCurOffset(4);
+                        offset = curStackOffset;
+                        addValueOffsetMap(operand1, offset);
+                    }
+                    new MemAsm(assemblyTable, "lw", srcReg, Register.SP, offset);
+                }
+            }
+            ArrayList<Mypair<Boolean, Integer>> mulOptShifts = getMulOptShifts(imm);
+            if (mulOptShifts.isEmpty()) {
+                new LiAsm(assemblyTable, Register.K0, imm);
+                new MdsAsm(assemblyTable,"mult", Register.K0, srcReg);
+                new HiLoAsm(assemblyTable,"mflo", tarReg);
+            } else {
+                if (mulOptShifts.size() == 1) {
+                    new BinaryAsm(assemblyTable, "sll", tarReg, srcReg, mulOptShifts.get(0).getSecond());
+                    if (!mulOptShifts.get(0).getFirst()) {
+                        new BinaryAsm(assemblyTable, "subu", tarReg, Register.ZERO, tarReg);
+                    }
+                } else {
+                    Register tmp = Register.GP;
+                    new BinaryAsm(assemblyTable, "sll", tmp, srcReg, mulOptShifts.get(0).getSecond());
+                    if (!mulOptShifts.get(0).getFirst()) {
+                        new BinaryAsm(assemblyTable, "subu", tmp, Register.ZERO, tmp);
+                    }
+                    if (mulOptShifts.get(1).getSecond() == 0) {
+                        new BinaryAsm(assemblyTable, mulOptShifts.get(1).getFirst() ? "addu" : "subu", tarReg, tmp, srcReg);
+                    }
+                    else {
+                        new BinaryAsm(assemblyTable, "sll", Register.FP, srcReg, mulOptShifts.get(1).getSecond());
+                        new BinaryAsm(assemblyTable, mulOptShifts.get(1).getFirst() ? "addu" : "subu", tarReg, tmp, Register.FP);
+                    }
+                }
+            }
+        } else {
+            Register reg1 = Register.K0;
+            Register reg2 = Register.K1;
+            if (getRegOf(operand1) != null) {
+                reg1 = getRegOf(operand1);
+            } else {
+                Integer offset = getOffsetOf(operand1);
+                if (offset == null) {
+                    subCurOffset(4);
+                    offset = curStackOffset;
+                    addValueOffsetMap(operand1, offset);
+                }
+                new MemAsm(assemblyTable, "lw", reg1, Register.SP, offset);
+            }
+            if (getRegOf(operand2) != null) {
+                reg2 = getRegOf(operand2);
+            }
+            else {
+                Integer offset = getOffsetOf(operand2);
+                if (offset == null) {
+                    subCurOffset(4);
+                    offset = curStackOffset;
+                    addValueOffsetMap(operand2, offset);
+                }
+                new MemAsm(assemblyTable, "lw", reg2, Register.SP, offset);
+            }
+            new MdsAsm(assemblyTable,"mult", reg1, reg2);
+            new HiLoAsm(assemblyTable,"mflo", tarReg);
+        }
+        if (getRegOf(instr) == null) {
+            subCurOffset(4);
+            int curOffset = curStackOffset;
+            addValueOffsetMap(instr, curOffset);
+            new MemAsm(assemblyTable,  "sw", tarReg, Register.SP, curOffset);
+        }
+    }
+
     public void parseMulDivSremInstr(BinaryInstr instr) {
+        if (instr.isMul()) {
+            parseMulEfficient(instr);
+            return;
+        }
         Value operand1 = instr.getOperand(0);
         Value operand2 = instr.getOperand(1);
         Register reg1 = Register.K0;
