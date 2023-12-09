@@ -3,6 +3,7 @@ package mips;
 import lightllr.*;
 import lightllr.Module;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -499,8 +500,22 @@ public class MipsParser {
             argList.add(instr.getOperand(i));
         }
         ArrayList<Register> allocatedRegs = getAllocatedRegs();
-       // HashSet<Register> hh = func.getVar2reg() == null ? new HashSet<>() : new HashSet<>(func.getVar2reg().values());
-       // allocatedRegs.retainAll(hh);
+        HashSet<Register> hh = func.getVar2reg() == null ? new HashSet<>() : new HashSet<>(func.getVar2reg().values());
+        HashSet<Function> visited = new HashSet<>();
+        ArrayDeque<Function> queue = new ArrayDeque<>();
+        visited.add(func);
+        queue.add(func);
+        while(!queue.isEmpty()) {
+            Function item = queue.pollFirst();
+            for (Function ff : item.getCalleeList()) {
+                if (!ff.isLibrary() && !visited.contains(ff)) {
+                    visited.add(ff);
+                    queue.add(ff);
+                    hh.addAll(ff.getVar2reg() == null ? new HashSet<>() : new HashSet<>(ff.getVar2reg().values()));
+                }
+            }
+        }
+        allocatedRegs.retainAll(hh);
         int curOffset = curStackOffset;
         int regNum = 0;
         for (Register reg : allocatedRegs) {
@@ -704,14 +719,19 @@ public class MipsParser {
             Value con = instr.getOperand(0);
             BasicBlock trueBlock = (BasicBlock) instr.getOperand(1);
             BasicBlock falseBlock = (BasicBlock) instr.getOperand(2);
-
-            Register reg = getRegOf(con);
-            if (reg == null) {
-                reg = Register.K0;
-                new MemAsm(assemblyTable, "lw", reg, Register.SP, getOffsetOf(con));
+            if (con instanceof ConstantInt) {
+                int truth = ((ConstantInt)con).getTruth();
+                new JumpAsm(assemblyTable, "j", truth == 1 ? trueBlock.getName() : falseBlock.getName());
+            } else {
+                Register reg = getRegOf(con);
+                if (reg == null) {
+                    reg = Register.K0;
+                    new MemAsm(assemblyTable, "lw", reg, Register.SP, getOffsetOf(con));
+                }
+                new BranchAsm(assemblyTable, "bne", reg, Register.ZERO, trueBlock.getName());
+                new JumpAsm(assemblyTable, "j", falseBlock.getName());
             }
-            new BranchAsm(assemblyTable, "bne", reg, Register.ZERO, trueBlock.getName());
-            new JumpAsm(assemblyTable, "j", falseBlock.getName());
+
         } else {
             BasicBlock targetBB = (BasicBlock) instr.getOperand(0);
             new JumpAsm(assemblyTable, "j", targetBB.getName());

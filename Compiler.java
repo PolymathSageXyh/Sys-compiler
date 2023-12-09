@@ -57,7 +57,7 @@ public class Compiler {
             pp.addPass(new Mem2Reg(sysBuilder.getModule()), false);
             pp.addPass(new SideEffect(sysBuilder.getModule()), false);
             pp.addPass(new KillDeadCode(sysBuilder.getModule()), false);
-            //pp.addPass(new ConstPropagation(sysBuilder.getModule()), false);
+            pp.addPass(new ConstPropagation(sysBuilder.getModule()), false);
             pp.addPass(new LoopInvHoist(sysBuilder.getModule()), false);
             pp.addPass(new ActiveVars(sysBuilder.getModule()), false);
             pp.addPass(new RegAllocator(sysBuilder.getModule()), false);
