@@ -470,9 +470,165 @@ public class MipsParser {
         }
     }
 
+    public int ctz(int n) {
+        int res = 0;
+        n = n >>> 1;
+        while (n != 0) {
+            n = n >>> 1;
+            res++;
+        }
+        return res;
+    }
+
+    public ArrayList<Long> chooseMultiplier(int abs, int pre) {
+        int N = 32;
+        long l = (long)((Math.log(abs) - 1e-5) / Math.log(2.0)) + 1;
+        long shPost = l;
+        long mLow = (1L << (N + l)) / abs;
+        long mHigh = ((1L << (N + l)) + (1L << (N + l - pre))) / abs;
+        while (mLow / 2 < mHigh / 2 && shPost > 0) {
+            mLow /= 2;
+            mHigh /= 2;
+            shPost -= 1;
+        }
+        ArrayList<Long> res = new ArrayList<>();
+        res.add(mHigh);
+        res.add(shPost);
+        res.add(l);
+        return res;
+    }
+
+    private Register getCeilDividend(Register oriDividend, int abs) {
+        int l = ctz(abs);
+        Register tmp1 = Register.GP;
+        new BinaryAsm(assemblyTable, "sra", tmp1, oriDividend, 31);
+        new BinaryAsm(assemblyTable, "srl", tmp1, tmp1, 32 - l);
+        new BinaryAsm(assemblyTable, "addu", tmp1, oriDividend, tmp1);
+        return tmp1;
+    }
+
+    private void constDiv(Register dst, Register dividend, int divisorImm) {
+        int abs = divisorImm > 0 ? divisorImm : -divisorImm;
+        if (divisorImm == -1) {
+            new BinaryAsm(assemblyTable, "subu", dst, Register.ZERO, dividend);
+            return;
+        } else if (divisorImm == 1) {
+            if (dst != dividend) {
+                new MoveAsm(assemblyTable, dst, dividend);
+            }
+        }
+        else if ((abs & (abs - 1)) == 0) {
+            int l = ctz(abs);
+            Register newDividend = getCeilDividend(dividend, abs);
+            new BinaryAsm(assemblyTable, "sra", dst, newDividend, l);
+        }
+        else {
+            ArrayList<Long> res = chooseMultiplier(abs, 31);
+            long l = res.get(2);
+            long shPost = res.get(1);
+            long m = res.get(0);
+            int n = (int) ((m << 32) >>> 32);
+            Register tmp0 = Register.GP;
+            Register tmp1 = Register.FP;
+
+            if (m >= 0x80000000L) {
+                long mm = m - (1L << 32);
+                int io = (int) ((mm << 32) >>> 32);
+                new LiAsm(assemblyTable, tmp0, io);
+                new HiLoAsm(assemblyTable, "mthi", dividend);
+                new MdsAsm(assemblyTable, "madd", dividend, tmp0);
+                new HiLoAsm(assemblyTable, "mfhi", tmp1);
+            }
+            else {
+                new LiAsm(assemblyTable, tmp0, n);
+                new MdsAsm(assemblyTable, "mult", dividend, tmp0);
+                new HiLoAsm(assemblyTable, "mfhi", tmp1);
+            }
+            Register tmp2 = tmp0;
+            new BinaryAsm(assemblyTable, "sra", tmp2, tmp1, (int)shPost);
+            new BinaryAsm(assemblyTable, "srl", tmp1, dividend, 31);
+            new BinaryAsm(assemblyTable, "addu", dst, tmp2, tmp1);
+        }
+        if (divisorImm < 0) {
+            new BinaryAsm(assemblyTable, "subu", dst, Register.ZERO, dst);
+        }
+    }
+
+    public void parseDivEfficient(BinaryInstr instr) {
+        Value operand1 = instr.getOperand(0);
+        Value operand2 = instr.getOperand(1);
+        boolean isOp1Const = operand1 instanceof ConstantInt;
+        boolean isOp2Const = operand2 instanceof ConstantInt;
+        Register tarReg = getRegOf(instr);
+        if (tarReg == null) {
+            tarReg = Register.K0;
+        }
+        Register divReg = Register.K1;
+        if (isOp1Const && isOp2Const) {
+            int op1 = ((ConstantInt)operand1).getTruth();
+            int op2 = ((ConstantInt)operand2).getTruth();
+            int res =  op1 / op2;
+            new LiAsm(assemblyTable, tarReg, res);
+            if (getRegOf(instr) == null) {
+                subCurOffset(4);
+                int curOffset = curStackOffset;
+                addValueOffsetMap(instr, curOffset);
+                new MemAsm(assemblyTable,  "sw", tarReg, Register.SP, curOffset);
+            }
+        } else if (isOp2Const) {
+            int dd = ((ConstantInt)operand2).getTruth();
+            if (getRegOf(operand1) != null) {
+                divReg = getRegOf(operand1);
+            }
+            constDiv(tarReg, divReg, dd);
+        } else {
+            Register reg1 = Register.K0;
+            Register reg2 = Register.K1;
+            if (operand1 instanceof ConstantInt) {
+                new LiAsm(assemblyTable, reg1, ((ConstantInt)operand1).getTruth());
+            }
+            else if (getRegOf(operand1) != null) {
+                reg1 = getRegOf(operand1);
+            }
+            else {
+                Integer offset = getOffsetOf(operand1);
+                if (offset == null) {
+                    subCurOffset(4);
+                    offset = curStackOffset;
+                    addValueOffsetMap(operand1, offset);
+                }
+                new MemAsm(assemblyTable, "lw", reg1, Register.SP, offset);
+            }
+            if (getRegOf(operand2) != null) {
+                reg2 = getRegOf(operand2);
+            }
+            else {
+                Integer offset = getOffsetOf(operand2);
+                if (offset == null) {
+                    subCurOffset(4);
+                    offset = curStackOffset;
+                    addValueOffsetMap(operand2, offset);
+                }
+                new MemAsm(assemblyTable, "lw", reg2, Register.SP, offset);
+            }
+            new MdsAsm(assemblyTable, "div", reg1, reg2);
+            new HiLoAsm(assemblyTable,"mflo", tarReg);
+        }
+        if (getRegOf(instr) == null) {
+            subCurOffset(4);
+            int curOffset = curStackOffset;
+            addValueOffsetMap(instr, curOffset);
+            new MemAsm(assemblyTable,  "sw", tarReg, Register.SP, curOffset);
+        }
+    }
+
     public void parseMulDivSremInstr(BinaryInstr instr) {
         if (instr.isMul()) {
             parseMulEfficient(instr);
+            return;
+        }
+        if (instr.isDiv()) {
+            parseDivEfficient(instr);
             return;
         }
         Value operand1 = instr.getOperand(0);
